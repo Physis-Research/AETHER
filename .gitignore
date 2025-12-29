@@ -1,0 +1,24 @@
+# AETHER: Adaptive Evolutionary Trading & Harvesting Engine
+# Build & Artifacts
+target/
+
+# Data & Models (User Generated)
+data/*
+!data/.gitkeep
+models/*
+!models/.gitkeep
+reports/*
+!reports/.gitkeep
+
+# CSV & Data formats
+*.csv
+*.json
+*.log
+
+# IDE & OS Noise
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
