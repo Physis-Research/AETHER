@@ -1,10 +1,10 @@
 use ndarray::{ArrayView2, ArrayViewMut1};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-pub const TOTAL_FEATURES: usize = 16;
+pub const TOTAL_FEATURES: usize = 23;
 const CHUNK_SIZE: usize = 512;
-const MAX_STACK_DEPTH: usize = 64;
-const MAX_GENOME_LEN: usize = 30;
+const MAX_STACK_DEPTH: usize = 128;
+const MAX_GENOME_LEN: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     Add,
@@ -17,26 +17,33 @@ pub enum Op {
     Min,
     Max,
     Gate,
-    Sigmoid,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(usize)]
 pub enum Terminal {
-    V = 0,
+    Velocity = 0,
     RelMom = 1,
     VolDelta = 2,
     Correl = 3,
-    F = 4,
-    K = 5,
-    L = 6,
-    Friction = 7,
-    Hurst = 8,
-    LeadV = 9,
-    FastFric = 10,
-    SlowFric = 11,
-    Regime = 12,
-    AssetVol = 13,
-    Resid = 14,
-    VolVol = 15,
+    Hurst = 4,
+    Friction = 5,
+    Efficiency = 6,
+    LeadV = 7,
+    MarketRegime = 8,
+    AssetVol = 9,
+    Resid = 10,
+    VolVol = 11,
+    Slippage = 12,
+    Funding = 13,
+    LongRet = 14,
+    StdDev = 15,
+    BullStrength = 16,
+    EmaFast = 17,
+    EmaSlow = 18,
+    Rsi = 19,
+    BbUpper = 20,
+    BbLower = 21,
+    BbWidth = 22,
 }
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Node {
@@ -44,55 +51,65 @@ pub enum Node {
     Terminal(Terminal),
     Constant(f64),
 }
-const OPS: [(Op, u8); 7] = [
+const OPS: [(Op, u8); 10] = [
     (Op::Add, 2),
     (Op::Sub, 2),
     (Op::Mul, 2),
     (Op::Div, 2),
     (Op::Tanh, 1),
     (Op::Gate, 3),
-    (Op::Sigmoid, 1),
+    (Op::Abs, 1),
+    (Op::Log, 1),
+    (Op::Min, 2),
+    (Op::Max, 2),
 ];
-const TERMINALS: [Terminal; 16] = [
-    Terminal::V,
+const TERMINALS: [Terminal; 23] = [
+    Terminal::Velocity,
     Terminal::RelMom,
     Terminal::VolDelta,
     Terminal::Correl,
-    Terminal::F,
-    Terminal::K,
-    Terminal::L,
-    Terminal::Friction,
     Terminal::Hurst,
+    Terminal::Friction,
+    Terminal::Efficiency,
     Terminal::LeadV,
-    Terminal::FastFric,
-    Terminal::SlowFric,
-    Terminal::Regime,
+    Terminal::MarketRegime,
     Terminal::AssetVol,
     Terminal::Resid,
     Terminal::VolVol,
+    Terminal::Slippage,
+    Terminal::Funding,
+    Terminal::LongRet,
+    Terminal::StdDev,
+    Terminal::BullStrength,
+    Terminal::EmaFast,
+    Terminal::EmaSlow,
+    Terminal::Rsi,
+    Terminal::BbUpper,
+    Terminal::BbLower,
+    Terminal::BbWidth,
 ];
+
 pub fn terminals() -> &'static [Terminal] {
     &TERMINALS
 }
-#[inline(always)]
-fn sigmoid(x: f64) -> f64 {
-    1.0 / (1.0 + (-x).exp())
-}
-#[allow(clippy::needless_range_loop)]
+
 pub fn evaluate(mut res: ArrayViewMut1<'_, f64>, genome: &[Node], data: ArrayView2<'_, f64>) {
     let n_samples = data.nrows();
     let mut stack = [[0.0f64; CHUNK_SIZE]; MAX_STACK_DEPTH];
+    let raw = data.as_slice_memory_order().unwrap();
+    let cols: Vec<_> = (0..TOTAL_FEATURES)
+        .map(|i| &raw[i * n_samples..(i + 1) * n_samples])
+        .collect();
+
     for chunk_start in (0..n_samples).step_by(CHUNK_SIZE) {
         let chunk_end = (chunk_start + CHUNK_SIZE).min(n_samples);
         let size = chunk_end - chunk_start;
         let mut sp = 0;
+
         for node in genome {
             match node {
                 Node::Terminal(t) => {
-                    let col = data.column(*t as usize);
-                    for i in 0..size {
-                        stack[sp][i] = col[chunk_start + i];
-                    }
+                    stack[sp][..size].copy_from_slice(&cols[*t as usize][chunk_start..chunk_end]);
                     sp += 1;
                 }
                 Node::Constant(v) => {
@@ -101,82 +118,91 @@ pub fn evaluate(mut res: ArrayViewMut1<'_, f64>, genome: &[Node], data: ArrayVie
                 }
                 Node::Op(op, _) => match op {
                     Op::Add => {
-                        for i in 0..size {
-                            stack[sp - 2][i] += stack[sp - 1][i];
-                        }
                         sp -= 1;
+                        let (s1, s0) = stack.split_at_mut(sp);
+                        s1[sp - 1][..size]
+                            .iter_mut()
+                            .zip(s0[0][..size].iter())
+                            .for_each(|(a, b)| *a += b);
                     }
                     Op::Sub => {
-                        for i in 0..size {
-                            stack[sp - 2][i] -= stack[sp - 1][i];
-                        }
                         sp -= 1;
+                        let (s1, s0) = stack.split_at_mut(sp);
+                        s1[sp - 1][..size]
+                            .iter_mut()
+                            .zip(s0[0][..size].iter())
+                            .for_each(|(a, b)| *a -= b);
                     }
                     Op::Mul => {
-                        for i in 0..size {
-                            stack[sp - 2][i] *= stack[sp - 1][i];
-                        }
                         sp -= 1;
+                        let (s1, s0) = stack.split_at_mut(sp);
+                        s1[sp - 1][..size]
+                            .iter_mut()
+                            .zip(s0[0][..size].iter())
+                            .for_each(|(a, b)| *a *= b);
                     }
                     Op::Div => {
-                        for i in 0..size {
-                            stack[sp - 2][i] = if stack[sp - 1][i].abs() > 1e-9 {
-                                stack[sp - 2][i] / stack[sp - 1][i]
-                            } else {
-                                0.0
-                            };
-                        }
                         sp -= 1;
+                        let (s1, s0) = stack.split_at_mut(sp);
+                        s1[sp - 1][..size]
+                            .iter_mut()
+                            .zip(s0[0][..size].iter())
+                            .for_each(|(a, b)| *a = if b.abs() > 1e-9 { *a / b } else { 0.0 });
                     }
                     Op::Abs => {
-                        for i in 0..size {
-                            stack[sp - 1][i] = stack[sp - 1][i].abs();
-                        }
+                        stack[sp - 1][..size].iter_mut().for_each(|x| *x = x.abs());
                     }
                     Op::Tanh => {
-                        for i in 0..size {
-                            stack[sp - 1][i] = stack[sp - 1][i].tanh();
-                        }
+                        stack[sp - 1][..size].iter_mut().for_each(|x| *x = x.tanh());
                     }
                     Op::Log => {
-                        for i in 0..size {
-                            stack[sp - 1][i] = (stack[sp - 1][i].abs() + 1e-9).ln();
-                        }
+                        stack[sp - 1][..size]
+                            .iter_mut()
+                            .for_each(|x| *x = (x.abs() + 1e-9).ln());
                     }
                     Op::Min => {
-                        for i in 0..size {
-                            stack[sp - 2][i] = stack[sp - 2][i].min(stack[sp - 1][i]);
-                        }
                         sp -= 1;
+                        let (s1, s0) = stack.split_at_mut(sp);
+                        s1[sp - 1][..size]
+                            .iter_mut()
+                            .zip(s0[0][..size].iter())
+                            .for_each(|(a, b)| *a = a.min(*b));
                     }
                     Op::Max => {
-                        for i in 0..size {
-                            stack[sp - 2][i] = stack[sp - 2][i].max(stack[sp - 1][i]);
-                        }
                         sp -= 1;
+                        let (s1, s0) = stack.split_at_mut(sp);
+                        s1[sp - 1][..size]
+                            .iter_mut()
+                            .zip(s0[0][..size].iter())
+                            .for_each(|(a, b)| *a = a.max(*b));
                     }
                     Op::Gate => {
+                        sp -= 2;
+                        let (s1, s0) = stack.split_at_mut(sp);
+                        let cond = &s1[sp - 1][..size];
+                        let if_true = &s0[0][..size];
+                        let if_false = &s0[1][..size];
+                        let mut out = [0.0f64; CHUNK_SIZE];
                         for i in 0..size {
-                            stack[sp - 3][i] = if stack[sp - 3][i] > 0.0 {
-                                stack[sp - 2][i]
+                            out[i] = if cond[i] > 0.0 {
+                                if_true[i]
                             } else {
-                                stack[sp - 1][i]
+                                if_false[i]
                             };
                         }
-                        sp -= 2;
-                    }
-                    Op::Sigmoid => {
-                        for i in 0..size {
-                            stack[sp - 1][i] = sigmoid(stack[sp - 1][i]);
-                        }
+                        s1[sp - 1][..size].copy_from_slice(&out[..size]);
                     }
                 },
             }
         }
         if sp > 0 {
-            for i in 0..size {
-                res[chunk_start + i] = stack[0][i];
-            }
+            let res_chunk = &mut res.as_slice_mut().unwrap()[chunk_start..chunk_end];
+            res_chunk.copy_from_slice(&stack[0][..size]);
+            res_chunk.iter_mut().for_each(|x| {
+                if !x.is_finite() {
+                    *x = 0.0;
+                }
+            });
         }
     }
 }
@@ -184,7 +210,7 @@ pub fn generate_rpn(depth: usize, rng: &mut impl Rng) -> Vec<Node> {
     let mut genome = Vec::with_capacity(MAX_GENOME_LEN);
     build_recursive(depth.clamp(1, 8), &mut genome, rng);
     if !validate_genome(&genome) {
-        vec![Node::Terminal(Terminal::V)]
+        vec![Node::Terminal(Terminal::Velocity)]
     } else {
         genome
     }
@@ -262,59 +288,4 @@ fn get_subtree_range(genome: &[Node], end_idx: usize) -> std::ops::Range<usize> 
         }
     }
     end_idx..end_idx + 1
-}
-pub fn simplify(genome: &[Node]) -> Vec<Node> {
-    let mut stack: Vec<Vec<Node>> = Vec::new();
-    for node in genome {
-        match node {
-            Node::Terminal(_) | Node::Constant(_) => stack.push(vec![*node]),
-            Node::Op(op, arity) => {
-                if stack.len() >= *arity as usize {
-                    let mut args: Vec<_> = (0..*arity).map(|_| stack.pop().unwrap()).collect();
-                    args.reverse();
-                    if args
-                        .iter()
-                        .all(|a| a.len() == 1 && matches!(a[0], Node::Constant(_)))
-                    {
-                        let v: Vec<_> = args
-                            .iter()
-                            .map(|a| if let Node::Constant(x) = a[0] { x } else { 0.0 })
-                            .collect();
-                        let res = match op {
-                            Op::Add => Some(v[0] + v[1]),
-                            Op::Sub => Some(v[0] - v[1]),
-                            Op::Mul => Some(v[0] * v[1]),
-                            Op::Div => Some(if v[1].abs() > 1e-9 { v[0] / v[1] } else { 0.0 }),
-                            Op::Tanh => Some(v[0].tanh()),
-                            Op::Sigmoid => Some(sigmoid(v[0])),
-                            _ => None,
-                        };
-                        if let Some(val) = res {
-                            stack.push(vec![Node::Constant(val)]);
-                            continue;
-                        }
-                    }
-                    let mut combined = Vec::new();
-                    for a in args {
-                        combined.extend(a);
-                    }
-                    combined.push(*node);
-                    stack.push(combined);
-                }
-            }
-        }
-    }
-    stack.pop().unwrap_or_else(|| genome.to_vec())
-}
-pub fn genome_distance(g1: &[Node], g2: &[Node]) -> f64 {
-    let mut dist = (g1.len() as f64 - g2.len() as f64).abs() * 0.5;
-    for i in 0..g1.len().min(g2.len()) {
-        dist += match (&g1[i], &g2[i]) {
-            (Node::Op(o1, _), Node::Op(o2, _)) if o1 == o2 => 0.0,
-            (Node::Terminal(t1), Node::Terminal(t2)) if t1 == t2 => 0.0,
-            (Node::Constant(v1), Node::Constant(v2)) => (v1 - v2).abs().min(1.0),
-            _ => 1.0,
-        };
-    }
-    dist
 }

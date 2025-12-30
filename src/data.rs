@@ -1,8 +1,5 @@
-use crate::gp::TOTAL_FEATURES;
-use crate::{
-    AetherError, Result, Universe, IDX_EFFICIENCY, IDX_MARKET_REGIME, IDX_REL_MOM, IDX_VELOCITY,
-    IDX_VOL_DELTA, IDX_VOL_VOL, REGIME_THRESHOLD,
-};
+use crate::gp::{Terminal, TOTAL_FEATURES};
+use crate::{AetherError, Result, Universe, FUNDING_RATE, REGIME_THRESHOLD, SLIPPAGE_FLOOR};
 use ndarray::{Array2, ShapeBuilder};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -31,21 +28,24 @@ pub fn prepare_universe(csv_path: &str) -> Result<Universe> {
     timeline.sort();
     let n_time = timeline.len();
     let keys: Vec<_> = raw.keys().cloned().collect();
+    crate::debug!("data: {} tickers, {} timestamps", keys.len(), n_time);
 
     let mut all_rets = Vec::new();
     for ticker in &keys {
-        let mut rets = Vec::with_capacity(n_time);
-        let mut last = 0.0;
+        let mut series_rets = Vec::with_capacity(n_time);
+        let mut last_close = 0.0;
         for d in &timeline {
-            let close = raw[ticker].get(d).map(|v| v.0).unwrap_or(0.0);
-            rets.push(if last > 1e-9 && close > 1e-9 {
-                (close / last).ln()
+            let close = raw[ticker].get(d).map(|v| v.0).unwrap_or(last_close);
+            series_rets.push(if last_close > 1e-9 && close > 1e-9 {
+                (close / last_close).ln()
             } else {
                 0.0
             });
-            last = close;
+            if close > 1e-9 {
+                last_close = close;
+            }
         }
-        all_rets.push(rets);
+        all_rets.push(series_rets);
     }
 
     let mut market_regime = vec![0.0; n_time];
@@ -59,43 +59,47 @@ pub fn prepare_universe(csv_path: &str) -> Result<Universe> {
         market_regime[i] = total_vol / all_rets.len() as f64;
     }
 
-    let lead_v = {
-        let mut v = vec![0.0; n_time];
-        for i in 1..n_time {
-            let mut sum_ret = 0.0;
-            let mut count = 0.0;
-            for rets in &all_rets {
-                sum_ret += rets[i];
-                count += 1.0;
-            }
-            v[i] = if count > 0.0 { sum_ret / count } else { 0.0 };
-        }
-        v
-    };
+    let lead_v: Vec<f64> = (0..n_time)
+        .map(|i| {
+            let sum: f64 = all_rets.iter().map(|r| r[i]).sum();
+            sum / all_rets.len() as f64
+        })
+        .collect();
 
     let mut data_mats = Vec::new();
     let mut targets = Vec::new();
     let mut tickers = Vec::new();
 
     for ticker in &keys {
-        let mut closes = vec![0.0; n_time];
-        let mut volumes = vec![0.0; n_time];
+        let mut series_closes = vec![0.0; n_time];
+        let mut series_volumes = vec![0.0; n_time];
+        let mut last_c = 0.0;
         for (i, d) in timeline.iter().enumerate() {
-            let val = raw[ticker].get(d).cloned().unwrap_or((0.0, 0.0));
-            closes[i] = val.0;
-            volumes[i] = val.1;
+            let (c, v) = raw[ticker].get(d).cloned().unwrap_or((last_c, 0.0));
+            series_closes[i] = c;
+            series_volumes[i] = v;
+            if c > 1e-9 {
+                last_c = c;
+            }
         }
-        if closes.iter().any(|&c| c <= 1e-9) {
+        if series_closes.iter().any(|&c| c <= 1e-9) {
+            crate::debug!("data: dropping {} due to missing/zero closes", ticker);
             continue;
         }
 
         let mut t = vec![0.0; n_time];
         for i in 0..n_time - 1 {
-            t[i] = (closes[i + 1] / closes[i]).ln();
+            t[i] = (series_closes[i + 1] / series_closes[i]).ln();
         }
 
         let mut matrix = Array2::<f64>::zeros((n_time, TOTAL_FEATURES).f());
-        compute_physics_into(&closes, &volumes, &lead_v, &market_regime, &mut matrix);
+        compute_physics_into(
+            &series_closes,
+            &series_volumes,
+            &lead_v,
+            &market_regime,
+            &mut matrix,
+        );
         data_mats.push(matrix);
         targets.push(t);
         tickers.push(ticker.clone());
@@ -122,47 +126,115 @@ pub fn compute_physics_into(
     }
 
     for i in 20..n {
-        out[[i, IDX_REL_MOM]] = rets[i] - lead_v[i];
-        out[[i, 9]] = lead_v[i - 1];
+        let (r, ld, v) = (rets[i], lead_v[i], volumes[i]);
+        out[[i, Terminal::RelMom as usize]] = r - ld;
+        out[[i, Terminal::LeadV as usize]] = lead_v[i - 1];
 
         let v_avg = volumes[i - 5..i].iter().sum::<f64>() / 5.0;
-        out[[i, IDX_VOL_DELTA]] = if v_avg > 1e-9 {
-            (volumes[i] - v_avg) / v_avg
+        out[[i, Terminal::VolDelta as usize]] = if v_avg > 1e-9 {
+            (v - v_avg) / v_avg
         } else {
             0.0
         };
 
         let change = (closes[i] - closes[i - 20]).abs();
-        let volatility: f64 = (i - 19..=i)
+        let path_len: f64 = (i - 19..=i)
             .map(|idx| (closes[idx] - closes[idx - 1]).abs())
             .sum();
-        out[[i, IDX_EFFICIENCY]] = if volatility > 1e-9 {
-            change / volatility
+        out[[i, Terminal::Efficiency as usize]] = if path_len > 1e-9 {
+            change / path_len
         } else {
             0.0
         };
 
-        if i > 40 {
+        out[[i, Terminal::Friction as usize]] = if v > 1e-9 {
+            (closes[i] - closes[i - 1]).abs() / closes[i - 1] / (v / 1e6)
+        } else {
+            0.0
+        };
+
+        let m_win = &lead_v[i - 20..i];
+        let a_win = &rets[i - 20..i];
+        out[[i, Terminal::Correl as usize]] = crate::engine::pearson_correlation(m_win, a_win);
+
+        if i >= 40 {
+            let win = &rets[i - 40..i];
+            let mean = win.iter().sum::<f64>() / 40.0;
+            let (mut cd, mut mn, mut mx): (f64, f64, f64) = (0.0, 0.0, 0.0);
+            for &rv in win {
+                cd += rv - mean;
+                mn = mn.min(cd);
+                mx = mx.max(cd);
+            }
+            let std = (win.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / 40.0).sqrt();
+            out[[i, Terminal::Hurst as usize]] = if std > 1e-9 { (mx - mn) / std } else { 0.0 };
+
             let mut vols = Vec::with_capacity(20);
             for j in 0..20 {
-                let sub_rets = &rets[i - 40 + j..i - 20 + j];
-                let mean = sub_rets.iter().sum::<f64>() / 20.0;
-                vols.push(
-                    (sub_rets.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / 20.0).sqrt(),
-                );
+                let sub = &rets[i - 40 + j..i - 20 + j];
+                let sm = sub.iter().sum::<f64>() / 20.0;
+                vols.push((sub.iter().map(|&x| (x - sm).powi(2)).sum::<f64>() / 20.0).sqrt());
             }
-            let v_mean = vols.iter().sum::<f64>() / 20.0;
-            out[[i, IDX_VOL_VOL]] =
-                (vols.iter().map(|&x| (x - v_mean).powi(2)).sum::<f64>() / 20.0).sqrt();
+            let vm = vols.iter().sum::<f64>() / 20.0;
+            out[[i, Terminal::VolVol as usize]] =
+                (vols.iter().map(|&x| (x - vm).powi(2)).sum::<f64>() / 20.0).sqrt();
         }
 
-        let r_avg = rets[i - 5..i].iter().sum::<f64>() / 5.0;
-        let o_avg = rets[i - 10..i - 5].iter().sum::<f64>() / 5.0;
-        out[[i, IDX_VELOCITY]] = r_avg - o_avg;
+        out[[i, Terminal::Velocity as usize]] = (rets[i - 5..i].iter().sum::<f64>() / 5.0)
+            - (rets[i - 10..i - 5].iter().sum::<f64>() / 5.0);
+        out[[i, Terminal::Resid as usize]] = r - (out[[i, Terminal::Correl as usize]] * ld);
+
+        if i >= 60 {
+            let win = &rets[i - 60..i];
+            let l_ret: f64 = win.iter().sum();
+            let mean = l_ret / 60.0;
+            let std = (win.iter().map(|&x| (x - mean).powi(2)).sum::<f64>() / 60.0).sqrt();
+            out[[i, Terminal::LongRet as usize]] = l_ret;
+            out[[i, Terminal::StdDev as usize]] = std;
+
+            let (mut ef, mut es) = (rets[i - 1], rets[i - 1]);
+            let (af, as_) = (2.0 / 11.0, 2.0 / 31.0);
+            for j in 1..60 {
+                ef = rets[i - j - 1] * af + ef * (1.0 - af);
+                es = rets[i - j - 1] * as_ + es * (1.0 - as_);
+            }
+            out[[i, Terminal::EmaFast as usize]] = ef;
+            out[[i, Terminal::EmaSlow as usize]] = es;
+            out[[i, Terminal::BullStrength as usize]] = if ef > es { 1.0 } else { -1.0 };
+
+            let (mut g, mut l) = (0.0, 0.0);
+            for j in 0..14 {
+                let d = rets[i - j] - rets[i - j - 1];
+                if d > 0.0 {
+                    g += d
+                } else {
+                    l -= d
+                }
+            }
+            out[[i, Terminal::Rsi as usize]] =
+                100.0 - (100.0 / (1.0 + (if l > 1e-9 { g / l } else { 100.0 })));
+
+            let bm = rets[i - 20..=i].iter().sum::<f64>() / 21.0;
+            let bs = (rets[i - 20..=i]
+                .iter()
+                .map(|&x| (x - bm).powi(2))
+                .sum::<f64>()
+                / 21.0)
+                .sqrt();
+            out[[i, Terminal::BbUpper as usize]] = bm + 2.0 * bs;
+            out[[i, Terminal::BbLower as usize]] = bm - 2.0 * bs;
+            out[[i, Terminal::BbWidth as usize]] = if bm.abs() > 1e-9 {
+                (4.0 * bs) / bm
+            } else {
+                0.0
+            };
+        }
     }
     for i in 0..n {
-        out[[i, IDX_MARKET_REGIME]] = regime[i];
-        out[[i, 13]] = volumes[i];
+        out[[i, Terminal::MarketRegime as usize]] = regime[i];
+        out[[i, Terminal::AssetVol as usize]] = volumes[i];
+        out[[i, Terminal::Slippage as usize]] = SLIPPAGE_FLOOR;
+        out[[i, Terminal::Funding as usize]] = FUNDING_RATE;
     }
 }
 
@@ -172,7 +244,7 @@ pub fn filter_by_regime(uni: &Universe, is_bull: bool) -> (Vec<Array2<f64>>, Vec
     for (m, t) in uni.data_matrices.iter().zip(uni.targets.iter()) {
         let (mut fm, mut ft) = (Vec::new(), Vec::new());
         for i in 0..m.nrows() {
-            let r = m[[i, IDX_MARKET_REGIME]];
+            let r = m[[i, Terminal::MarketRegime as usize]];
             if (is_bull && r < REGIME_THRESHOLD) || (!is_bull && r >= REGIME_THRESHOLD) {
                 fm.push(m.row(i).to_owned());
                 ft.push(t[i]);
@@ -187,17 +259,46 @@ pub fn filter_by_regime(uni: &Universe, is_bull: bool) -> (Vec<Array2<f64>>, Vec
             out_targets.push(ft);
         }
     }
+    crate::debug!(
+        "data: regime={} selected {} instruments",
+        if is_bull { "bull" } else { "bear" },
+        out_mats.len()
+    );
     (out_mats, out_targets)
 }
 
-pub fn fetch_and_process(interval: &str, days: u64) -> Result<()> {
-    println!(
-        "Fetching {} days of {} data from Binance...",
-        days, interval
-    );
-    let tickers = vec![
-        "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "ADAUSDT", "XRPUSDT", "LINKUSDT",
-    ];
+pub fn fetch_and_process(
+    source: &str,
+    interval: &str,
+    days: u64,
+    tickers: Option<String>,
+    append: bool,
+) -> Result<()> {
+    match source.to_lowercase().as_str() {
+        "binance" => fetch_binance(interval, days, tickers, append),
+        "yahoo" => fetch_yahoo(interval, days, tickers, append),
+        _ => Err(AetherError::Integrity(format!(
+            "Unsupported data source: {}",
+            source
+        ))),
+    }
+}
+
+fn fetch_binance(interval: &str, _days: u64, tickers: Option<String>, append: bool) -> Result<()> {
+    let tickers = tickers
+        .map(|t| t.split(',').map(|s| s.to_string()).collect())
+        .unwrap_or_else(|| {
+            vec![
+                "BTCUSDT".into(),
+                "ETHUSDT".into(),
+                "SOLUSDT".into(),
+                "BNBUSDT".into(),
+                "ADAUSDT".into(),
+                "XRPUSDT".into(),
+                "LINKUSDT".into(),
+            ]
+        });
+
     let mut records = Vec::new();
     for t in tickers {
         let url = format!(
@@ -207,7 +308,8 @@ pub fn fetch_and_process(interval: &str, days: u64) -> Result<()> {
         let resp: Vec<Vec<serde_json::Value>> = ureq::get(&url)
             .call()
             .map_err(|e| AetherError::Io(std::io::Error::other(e)))?
-            .into_json()
+            .body_mut()
+            .read_json()
             .map_err(|e| AetherError::Io(std::io::Error::other(e)))?;
         for k in resp {
             let dt = chrono::DateTime::from_timestamp(k[0].as_i64().unwrap_or(0) / 1000, 0)
@@ -219,12 +321,93 @@ pub fn fetch_and_process(interval: &str, days: u64) -> Result<()> {
             records.push(format!("{},{},{},{}", dt, c, v, t));
         }
     }
+    write_to_csv(records, append)
+}
+
+fn fetch_yahoo(interval: &str, days: u64, tickers: Option<String>, append: bool) -> Result<()> {
+    let tickers = tickers
+        .map(|t| t.split(',').map(|s| s.to_string()).collect())
+        .unwrap_or_else(|| {
+            vec![
+                "AAPL".into(),
+                "MSFT".into(),
+                "GOOGL".into(),
+                "AMZN".into(),
+                "META".into(),
+                "TSLA".into(),
+                "NVDA".into(),
+            ]
+        });
+
+    let range = match days {
+        0..=1 => "1d",
+        2..=5 => "5d",
+        6..=30 => "1mo",
+        31..=90 => "3mo",
+        91..=180 => "6mo",
+        181..=365 => "1y",
+        366..=730 => "2y",
+        731..=1825 => "5y",
+        1826..=3650 => "10y",
+        _ => "max",
+    };
+
+    let mut records = Vec::new();
+    for t in tickers {
+        let url = format!(
+            "https://query1.finance.yahoo.com/v8/finance/chart/{}?range={}&interval={}",
+            t, range, interval
+        );
+        let resp: serde_json::Value = ureq::get(&url)
+            .call()
+            .map_err(|e| AetherError::Io(std::io::Error::other(e)))?
+            .body_mut()
+            .read_json()
+            .map_err(|e| AetherError::Io(std::io::Error::other(e)))?;
+
+        let result = &resp["chart"]["result"][0];
+        let timestamps = result["timestamp"]
+            .as_array()
+            .ok_or_else(|| AetherError::Integrity(format!("No timestamps for ticker {}", t)))?;
+        let indicators = &result["indicators"]["quote"][0];
+        let closes = indicators["close"]
+            .as_array()
+            .ok_or_else(|| AetherError::Integrity(format!("No closes for ticker {}", t)))?;
+        let volumes = indicators["volume"]
+            .as_array()
+            .ok_or_else(|| AetherError::Integrity(format!("No volumes for ticker {}", t)))?;
+
+        for i in 0..timestamps.len() {
+            let ts = timestamps[i].as_i64().unwrap_or(0);
+            let c = closes[i].as_f64().unwrap_or(0.0);
+            let v = volumes[i].as_f64().unwrap_or(0.0);
+            if c > 1e-9 {
+                let dt = chrono::DateTime::from_timestamp(ts, 0)
+                    .unwrap_or_default()
+                    .format("%Y-%m-%d %H:%M:%S")
+                    .to_string();
+                records.push(format!("{},{},{},{}", dt, c, v, t));
+            }
+        }
+    }
+    write_to_csv(records, append)
+}
+
+fn write_to_csv(records: Vec<String>, append: bool) -> Result<()> {
     fs::create_dir_all("data")?;
-    println!("Writing output to data/market_data.csv (overwrites existing file).");
-    fs::write(
-        "data/market_data.csv",
-        format!("date,close,volume,ticker\n{}", records.join("\n")),
-    )
-    .map_err(AetherError::Io)?;
+    let path = "data/market_data.csv";
+    let header = "date,close,volume,ticker\n";
+    if append && fs::metadata(path).is_ok() {
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .map_err(AetherError::Io)?;
+        file.write_all(records.join("\n").as_bytes())
+            .map_err(AetherError::Io)?;
+        file.write_all(b"\n").map_err(AetherError::Io)?;
+    } else {
+        fs::write(path, format!("{}{}\n", header, records.join("\n"))).map_err(AetherError::Io)?;
+    }
     Ok(())
 }

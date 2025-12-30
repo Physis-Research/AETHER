@@ -7,6 +7,7 @@ pub mod engine;
 pub mod gp;
 use ndarray::Array2;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum AetherError {
@@ -18,16 +19,9 @@ pub enum AetherError {
     Serialization(#[from] serde_json::Error),
 }
 pub type Result<T> = std::result::Result<T, AetherError>;
-pub const SLIPPAGE_FLOOR: f64 = 0.001;
-pub const FUNDING_RATE: f64 = 0.0001;
+pub const SLIPPAGE_FLOOR: f64 = 0.0005;
+pub const FUNDING_RATE: f64 = 0.00005;
 pub const REGIME_THRESHOLD: f64 = 0.015;
-pub const IDX_VELOCITY: usize = 0;
-pub const IDX_REL_MOM: usize = 1;
-pub const IDX_VOL_DELTA: usize = 2;
-pub const IDX_CORREL: usize = 3;
-pub const IDX_EFFICIENCY: usize = 8;
-pub const IDX_MARKET_REGIME: usize = 12;
-pub const IDX_VOL_VOL: usize = 15;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Performance {
     pub roi: f64,
@@ -88,11 +82,27 @@ pub struct EvolutionConfig {
 impl Default for EvolutionConfig {
     fn default() -> Self {
         Self {
-            generations: 250,
-            pop_size: 2000,
-            early_stopping: 60,
+            generations: 1000,
+            pop_size: 10000,
+            early_stopping: 300,
             seed: 42,
             sharpe_annualization: (365.0 * 6.0f64).sqrt(),
         }
     }
+}
+
+static VERBOSE: AtomicBool = AtomicBool::new(false);
+pub fn is_verbose() -> bool {
+    VERBOSE.load(Ordering::Relaxed)
+}
+pub fn set_verbose(v: bool) {
+    VERBOSE.store(v, Ordering::Relaxed);
+}
+#[macro_export]
+macro_rules! debug {
+    ($($arg:tt)*) => {
+        if $crate::is_verbose() {
+            println!($($arg)*);
+        }
+    };
 }
