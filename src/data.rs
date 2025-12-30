@@ -1,17 +1,17 @@
 use crate::gp::{Terminal, TOTAL_FEATURES};
-use crate::{AetherError, Result, Universe, FUNDING_RATE, REGIME_THRESHOLD, SLIPPAGE_FLOOR};
+use crate::{PhysisError, Result, Universe, FUNDING_RATE, REGIME_THRESHOLD, SLIPPAGE_FLOOR};
 use ndarray::{Array2, ShapeBuilder};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 pub fn prepare_universe(csv_path: &str) -> Result<Universe> {
-    let content = fs::read_to_string(csv_path).map_err(AetherError::Io)?;
+    let content = fs::read_to_string(csv_path).map_err(PhysisError::Io)?;
     let mut reader = csv::Reader::from_reader(content.as_bytes());
     let mut raw: BTreeMap<String, BTreeMap<String, (f64, f64)>> = BTreeMap::new();
     let mut all_dates = HashSet::<String>::new();
 
     for result in reader.records() {
         let record = result.map_err(|e| {
-            AetherError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+            PhysisError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e))
         })?;
         if record.len() < 4 {
             continue;
@@ -277,7 +277,7 @@ pub fn fetch_and_process(
     match source.to_lowercase().as_str() {
         "binance" => fetch_binance(interval, days, tickers, append),
         "yahoo" => fetch_yahoo(interval, days, tickers, append),
-        _ => Err(AetherError::Integrity(format!(
+        _ => Err(PhysisError::Integrity(format!(
             "Unsupported data source: {}",
             source
         ))),
@@ -307,10 +307,10 @@ fn fetch_binance(interval: &str, _days: u64, tickers: Option<String>, append: bo
         );
         let resp: Vec<Vec<serde_json::Value>> = ureq::get(&url)
             .call()
-            .map_err(|e| AetherError::Io(std::io::Error::other(e)))?
+            .map_err(|e| PhysisError::Io(std::io::Error::other(e)))?
             .body_mut()
             .read_json()
-            .map_err(|e| AetherError::Io(std::io::Error::other(e)))?;
+            .map_err(|e| PhysisError::Io(std::io::Error::other(e)))?;
         for k in resp {
             let dt = chrono::DateTime::from_timestamp(k[0].as_i64().unwrap_or(0) / 1000, 0)
                 .unwrap_or_default()
@@ -360,22 +360,22 @@ fn fetch_yahoo(interval: &str, days: u64, tickers: Option<String>, append: bool)
         );
         let resp: serde_json::Value = ureq::get(&url)
             .call()
-            .map_err(|e| AetherError::Io(std::io::Error::other(e)))?
+            .map_err(|e| PhysisError::Io(std::io::Error::other(e)))?
             .body_mut()
             .read_json()
-            .map_err(|e| AetherError::Io(std::io::Error::other(e)))?;
+            .map_err(|e| PhysisError::Io(std::io::Error::other(e)))?;
 
         let result = &resp["chart"]["result"][0];
         let timestamps = result["timestamp"]
             .as_array()
-            .ok_or_else(|| AetherError::Integrity(format!("No timestamps for ticker {}", t)))?;
+            .ok_or_else(|| PhysisError::Integrity(format!("No timestamps for ticker {}", t)))?;
         let indicators = &result["indicators"]["quote"][0];
         let closes = indicators["close"]
             .as_array()
-            .ok_or_else(|| AetherError::Integrity(format!("No closes for ticker {}", t)))?;
+            .ok_or_else(|| PhysisError::Integrity(format!("No closes for ticker {}", t)))?;
         let volumes = indicators["volume"]
             .as_array()
-            .ok_or_else(|| AetherError::Integrity(format!("No volumes for ticker {}", t)))?;
+            .ok_or_else(|| PhysisError::Integrity(format!("No volumes for ticker {}", t)))?;
 
         for i in 0..timestamps.len() {
             let ts = timestamps[i].as_i64().unwrap_or(0);
@@ -402,12 +402,12 @@ fn write_to_csv(records: Vec<String>, append: bool) -> Result<()> {
         let mut file = fs::OpenOptions::new()
             .append(true)
             .open(path)
-            .map_err(AetherError::Io)?;
+            .map_err(PhysisError::Io)?;
         file.write_all(records.join("\n").as_bytes())
-            .map_err(AetherError::Io)?;
-        file.write_all(b"\n").map_err(AetherError::Io)?;
+            .map_err(PhysisError::Io)?;
+        file.write_all(b"\n").map_err(PhysisError::Io)?;
     } else {
-        fs::write(path, format!("{}{}\n", header, records.join("\n"))).map_err(AetherError::Io)?;
+        fs::write(path, format!("{}{}\n", header, records.join("\n"))).map_err(PhysisError::Io)?;
     }
     Ok(())
 }

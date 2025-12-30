@@ -1,6 +1,6 @@
 use crate::gp::{crossover, evaluate, generate_rpn, mutate, Node, Terminal};
 use crate::{
-    AetherError, Agent, EvolutionConfig, Individual, Performance, RegimeAwareIndividual, Result,
+    Agent, EvolutionConfig, Individual, Performance, PhysisError, RegimeAwareIndividual, Result,
     Universe, ValidationResult, ValidationSummary, FUNDING_RATE, REGIME_THRESHOLD,
 };
 use ndarray::{Array2, ShapeBuilder};
@@ -348,7 +348,7 @@ pub fn walk_forward_validation(
     seed: u64,
 ) -> Result<ValidationSummary> {
     if folds == 0 {
-        return Err(AetherError::Integrity("folds >= 1".into()));
+        return Err(PhysisError::Integrity("folds >= 1".into()));
     }
     let uni = crate::data::prepare_universe(path)?;
     let f_size = uni.dates.len() / folds;

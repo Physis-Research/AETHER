@@ -9,22 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
-name = "aether"
-version = "1.2.0"
-dependencies = [
- "chrono",
- "clap",
- "csv",
- "ndarray",
- "rand",
- "rayon",
- "serde",
- "serde_json",
- "thiserror",
- "ureq",
-]
-
-[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -665,6 +649,22 @@ name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
+
+[[package]]
+name = "physis"
+version = "1.2.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "csv",
+ "ndarray",
+ "rand",
+ "rayon",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ureq",
+]
 
 [[package]]
 name = "portable-atomic"

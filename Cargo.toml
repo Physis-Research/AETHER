@@ -1,18 +1,18 @@
 [package]
-name = "aether"
+name = "physis"
 version = "1.2.0"
 edition = "2021"
-authors = ["AETHER"]
-description = "High-performance regime-aware engine for quantitative research"
+authors = ["PHYSIS"]
+description = "High-performance physics-informed engine for quantitative research"
 license = "MIT"
 publish = false
 
 [[bin]]
-name = "aether"
+name = "physis"
 path = "src/main.rs"
 
 [lib]
-name = "aether"
+name = "physis"
 path = "src/lib.rs"
 
 [dependencies]

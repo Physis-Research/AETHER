@@ -1,6 +1,6 @@
-# AETHER
+# PHYSIS
 
-**AETHER** is a high-performance quantitative research engine utilizing **Regime-Aware Genetic Programming** to evolve robust mathematical agents.
+**PHYSIS** is a high-performance quantitative research engine utilizing **Physics-Informed Genetic Programming** to evolve robust mathematical agents.
 
 ## Core Methodology
 
@@ -14,9 +14,9 @@
 ```bash
 cargo build --release
 # Fetch and audit data
-./target/release/aether fetch --tickers BTCUSDT,ETHUSDT --days 365 --audit
+./target/release/physis fetch --tickers BTCUSDT,ETHUSDT --days 365 --audit
 # Validate out-of-sample performance
-./target/release/aether validate data/market_data.csv --folds 3 --seed 42
+./target/release/physis validate data/market_data.csv --folds 3 --seed 42
 ```
 
 ## Performance Metrics

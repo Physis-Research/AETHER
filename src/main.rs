@@ -1,13 +1,13 @@
-use aether::Result;
-use aether::{data, engine};
 use clap::{Parser, Subcommand};
+use physis::Result;
+use physis::{data, engine};
 use std::process;
 use std::time::Instant;
 
 #[derive(Parser)]
 #[command(
-    name = "aether",
-    about = "Adaptive Evolutionary Trading & Harvesting Engine"
+    name = "physis",
+    about = "Physics-Informed Strategy & Intelligent Simulation"
 )]
 struct Cli {
     #[arg(long, default_value_t = false)]
@@ -56,7 +56,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    aether::set_verbose(cli.verbose);
+    physis::set_verbose(cli.verbose);
     let start = Instant::now();
     match cli.command {
         Command::Validate { csv, folds, seed } => {

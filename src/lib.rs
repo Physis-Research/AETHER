@@ -1,4 +1,4 @@
-//! AETHER: regime-aware genetic programming engine for market research.
+//! PHYSIS: high-performance physics-informed engine for quantitative research.
 //!
 //! The library exposes data loading, GP evolution, and validation utilities.
 
@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use thiserror::Error;
 #[derive(Debug, Error)]
-pub enum AetherError {
+pub enum PhysisError {
     #[error("io failure: {0}")]
     Io(#[from] std::io::Error),
     #[error("integrity violation: {0}")]
@@ -18,7 +18,7 @@ pub enum AetherError {
     #[error("serialization failure: {0}")]
     Serialization(#[from] serde_json::Error),
 }
-pub type Result<T> = std::result::Result<T, AetherError>;
+pub type Result<T> = std::result::Result<T, PhysisError>;
 pub const SLIPPAGE_FLOOR: f64 = 0.0005;
 pub const FUNDING_RATE: f64 = 0.00005;
 pub const REGIME_THRESHOLD: f64 = 0.015;
